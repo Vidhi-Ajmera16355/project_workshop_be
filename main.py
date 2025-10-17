@@ -1,120 +1,87 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from langchain_community.llms import HuggingFacePipeline
-from langchain.prompts import FewShotPromptTemplate, PromptTemplate
 from transformers import pipeline
 import torch
 
 # Initialize FastAPI app
-app = FastAPI(title="AI Content Repurposer", version="1.0.0")
+app = FastAPI(title="AI Content Repurposer", version="2.0.0")
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173","https://project-workshop.onrender.com"],
+    allow_origins=["*"],  # Allow all origins for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Request model
+# Request models
 class ContentRequest(BaseModel):
     text: str
 
-# Response model
+# Response models
 class TweetResponse(BaseModel):
     tweet: str
     original_length: int
     tweet_length: int
 
-# Initialize the model (lazy loading)
-summarizer = None
-llm = None
+class SummaryResponse(BaseModel):
+    summary: str
+    original_length: int
+    summary_length: int
+    compression_ratio: float
 
-def initialize_model():
-    """Initialize the BART model and LangChain pipeline"""
-    global summarizer, llm
+class SentimentResponse(BaseModel):
+    sentiment: str
+    confidence: float
+    all_scores: dict
+
+class CompleteAnalysisResponse(BaseModel):
+    tweet: str
+    summary: str
+    sentiment: str
+    sentiment_confidence: float
+    original_length: int
+
+# Initialize models (lazy loading)
+summarizer = None
+sentiment_analyzer = None
+
+def initialize_models():
+    """Initialize all models"""
+    global summarizer, sentiment_analyzer
     
     if summarizer is None:
-        print("Loading BART model...")
-        
-        # Check if CUDA is available
+        print("Loading models...")
         device = 0 if torch.cuda.is_available() else -1
         
-        # Initialize BART summarization pipeline
+        # BART for summarization
         summarizer = pipeline(
             "summarization",
             model="facebook/bart-large-cnn",
             device=device,
-            max_length=100,
-            min_length=20,
+            max_length=130,
+            min_length=30,
             do_sample=True,
             temperature=0.7,
             top_p=0.9
         )
         
-        # Wrap in HuggingFacePipeline
-        llm = HuggingFacePipeline(pipeline=summarizer)
+        # DistilBERT for sentiment analysis
+        sentiment_analyzer = pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+            device=device
+        )
         
-        print("Model loaded successfully!")
-
-# Few-shot examples for creative tweet generation
-examples = [
-    {
-        "input": "Artificial intelligence is transforming the way we work and live. Machine learning algorithms can now process vast amounts of data in seconds, helping businesses make better decisions and improve efficiency.",
-        "output": "🤖 AI is revolutionizing our world! Machine learning processes massive data in SECONDS, driving smarter business decisions 📊✨ #AI #MachineLearning #FutureTech"
-    },
-    {
-        "input": "Climate change is one of the most pressing challenges of our time. Rising temperatures, melting ice caps, and extreme weather events are threatening ecosystems and communities worldwide.",
-        "output": "🌍 Climate crisis alert! Rising temps, melting ice & extreme weather are threatening our planet 🔥❄️ Time to ACT NOW! #ClimateChange #SaveOurPlanet"
-    },
-    {
-        "input": "The new smartphone features an advanced camera system with 108MP resolution, 5G connectivity, and an all-day battery life. It's designed for users who demand the best in mobile technology.",
-        "output": "📱 The ultimate smartphone is HERE! 108MP camera 📸 + 5G speed ⚡ + all-day battery 🔋 = Pure PERFECTION! #TechLife #Smartphone #Innovation"
-    }
-]
-
-# Create few-shot prompt template
-example_template = """
-Original: {input}
-Tweet: {output}
-"""
-
-example_prompt = PromptTemplate(
-    input_variables=["input", "output"],
-    template=example_template
-)
-
-prefix = """You are a creative social media expert. Transform long-form content into engaging, catchy tweets.
-Guidelines:
-- Keep it under 280 characters
-- Add relevant emojis (2-4 emojis)
-- Use power words and action verbs
-- Include 1-2 hashtags if relevant
-- Make it shareable and attention-grabbing
-- Maintain the key message
-
-Here are some examples:
-"""
-
-suffix = """
-Original: {input}
-Tweet:"""
-
-few_shot_prompt = FewShotPromptTemplate(
-    examples=examples,
-    example_prompt=example_prompt,
-    prefix=prefix,
-    suffix=suffix,
-    input_variables=["input"],
-    example_separator="\n"
-)
+        print("Models loaded successfully!")
 
 def generate_creative_tweet(text: str) -> str:
-    """Generate a creative tweet using BART and few-shot prompting"""
+    """Generate a creative tweet using BART"""
+    import random
     
-    # First, use BART to summarize the content
+    # Summarize the content
     summary_result = summarizer(
         text,
         max_length=60,
@@ -124,26 +91,18 @@ def generate_creative_tweet(text: str) -> str:
     
     base_summary = summary_result[0]['summary_text']
     
-    # Create a creative tweet based on the summary and few-shot examples
-    # Since BART is a summarization model, we'll enhance it with our few-shot approach
-    prompt = few_shot_prompt.format(input=text)
-    
-    # Use the pattern from examples to create an engaging tweet
-    tweet_parts = []
-    
-    # Add an attention-grabbing emoji at the start
+    # Start with an attention-grabbing emoji
     emojis_start = ["🚀", "✨", "💡", "🎯", "🔥", "⚡"]
-    import random
-    tweet_parts.append(random.choice(emojis_start))
+    tweet_parts = [random.choice(emojis_start)]
     
-    # Clean and shorten the summary
+    # Clean summary
     summary_clean = base_summary.strip()
     if len(summary_clean) > 200:
         summary_clean = summary_clean[:200] + "..."
     
     tweet_parts.append(summary_clean)
     
-    # Add relevant emojis based on content
+    # Add contextual emojis
     content_lower = text.lower()
     if any(word in content_lower for word in ["tech", "ai", "digital", "innovation"]):
         tweet_parts.append("💻🤖")
@@ -156,19 +115,33 @@ def generate_creative_tweet(text: str) -> str:
     else:
         tweet_parts.append("✨")
     
-    # Combine parts
     tweet = " ".join(tweet_parts)
     
-    # Ensure it's under 280 characters
+    # Ensure under 280 characters
     if len(tweet) > 280:
         tweet = tweet[:277] + "..."
     
     return tweet
 
+def generate_summary(text: str, max_length: int = 130) -> str:
+    """Generate a summary of the text"""
+    result = summarizer(
+        text,
+        max_length=max_length,
+        min_length=30,
+        do_sample=False
+    )
+    return result[0]['summary_text']
+
+def analyze_sentiment(text: str) -> dict:
+    """Analyze sentiment of the text"""
+    result = sentiment_analyzer(text[:512])[0]  # Limit to 512 tokens
+    return result
+
 @app.on_event("startup")
 async def startup_event():
-    """Initialize model on startup"""
-    initialize_model()
+    """Initialize models on startup"""
+    initialize_models()
 
 @app.get("/")
 async def root():
@@ -176,7 +149,8 @@ async def root():
     return {
         "message": "AI Content Repurposer API",
         "status": "running",
-        "version": "1.0.0"
+        "version": "2.0.0",
+        "features": ["tweet_generation", "summarization", "sentiment_analysis"]
     }
 
 @app.get("/health")
@@ -184,23 +158,14 @@ async def health_check():
     """Detailed health check"""
     return {
         "status": "healthy",
-        "model_loaded": summarizer is not None,
+        "models_loaded": summarizer is not None and sentiment_analyzer is not None,
         "cuda_available": torch.cuda.is_available()
     }
 
 @app.post("/generate", response_model=TweetResponse)
 async def generate_tweet(request: ContentRequest):
-    """
-    Generate a creative tweet from input text
-    
-    Args:
-        request: ContentRequest with text field
-        
-    Returns:
-        TweetResponse with generated tweet and metadata
-    """
+    """Generate a creative tweet from input text"""
     try:
-        # Validate input
         if not request.text or len(request.text.strip()) < 10:
             raise HTTPException(
                 status_code=400,
@@ -213,11 +178,9 @@ async def generate_tweet(request: ContentRequest):
                 detail="Input text is too long. Please keep it under 5000 characters."
             )
         
-        # Initialize model if not already loaded
         if summarizer is None:
-            initialize_model()
+            initialize_models()
         
-        # Generate the tweet
         tweet = generate_creative_tweet(request.text)
         
         return TweetResponse(
@@ -233,6 +196,116 @@ async def generate_tweet(request: ContentRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate tweet: {str(e)}"
+        )
+
+@app.post("/summarize", response_model=SummaryResponse)
+async def summarize_text(request: ContentRequest):
+    """Generate a summary of the input text"""
+    try:
+        if not request.text or len(request.text.strip()) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text is too short. Please provide at least 50 characters for summarization."
+            )
+        
+        if len(request.text) > 5000:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text is too long. Please keep it under 5000 characters."
+            )
+        
+        if summarizer is None:
+            initialize_models()
+        
+        summary = generate_summary(request.text)
+        
+        return SummaryResponse(
+            summary=summary,
+            original_length=len(request.text),
+            summary_length=len(summary),
+            compression_ratio=round(len(summary) / len(request.text), 2)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating summary: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate summary: {str(e)}"
+        )
+
+@app.post("/sentiment", response_model=SentimentResponse)
+async def analyze_sentiment_endpoint(request: ContentRequest):
+    """Analyze the sentiment of the input text"""
+    try:
+        if not request.text or len(request.text.strip()) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text is too short. Please provide at least 10 characters."
+            )
+        
+        if sentiment_analyzer is None:
+            initialize_models()
+        
+        sentiment_result = analyze_sentiment(request.text)
+        
+        return SentimentResponse(
+            sentiment=sentiment_result['label'],
+            confidence=round(sentiment_result['score'], 4),
+            all_scores={
+                sentiment_result['label']: round(sentiment_result['score'], 4)
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing sentiment: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to analyze sentiment: {str(e)}"
+        )
+
+@app.post("/analyze-all", response_model=CompleteAnalysisResponse)
+async def complete_analysis(request: ContentRequest):
+    """Perform complete analysis: tweet generation, summarization, and sentiment analysis"""
+    try:
+        if not request.text or len(request.text.strip()) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text is too short. Please provide at least 50 characters."
+            )
+        
+        if len(request.text) > 5000:
+            raise HTTPException(
+                status_code=400,
+                detail="Input text is too long. Please keep it under 5000 characters."
+            )
+        
+        if summarizer is None or sentiment_analyzer is None:
+            initialize_models()
+        
+        # Generate all analyses
+        tweet = generate_creative_tweet(request.text)
+        summary = generate_summary(request.text)
+        sentiment_result = analyze_sentiment(request.text)
+        
+        return CompleteAnalysisResponse(
+            tweet=tweet,
+            summary=summary,
+            sentiment=sentiment_result['label'],
+            sentiment_confidence=round(sentiment_result['score'], 4),
+            original_length=len(request.text)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in complete analysis: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to perform complete analysis: {str(e)}"
         )
 
 if __name__ == "__main__":
